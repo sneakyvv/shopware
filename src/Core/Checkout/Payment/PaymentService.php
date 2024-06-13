@@ -5,6 +5,7 @@ namespace Shopware\Core\Checkout\Payment;
 use Psr\Log\LoggerInterface;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionEntity;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStateHandler;
+use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStates;
 use Shopware\Core\Checkout\Payment\Cart\AsyncPaymentTransactionStruct;
 use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\AsynchronousPaymentHandlerInterface;
 use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\PaymentHandlerRegistry;
@@ -19,6 +20,7 @@ use Shopware\Core\Checkout\Payment\Exception\InvalidTransactionException;
 use Shopware\Core\Checkout\Payment\Exception\PaymentProcessException;
 use Shopware\Core\Checkout\Payment\Exception\SyncPaymentProcessException;
 use Shopware\Core\Checkout\Payment\Exception\TokenExpiredException;
+use Shopware\Core\Checkout\Payment\Exception\TokenInvalidatedException;
 use Shopware\Core\Checkout\Payment\Exception\UnknownPaymentMethodException;
 use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
@@ -129,6 +131,22 @@ class PaymentService
 
         $transaction = $this->getPaymentTransactionStruct($transactionId, $context->getContext());
 
+        if ($token->isInvalidated()) {
+            // Token was already handled
+            // Check current state of the transaction to determine if we need to throw an exception
+            $stateName = $transaction->getOrderTransaction()->getStateMachineState()->getTechnicalName();
+            if ($stateName === OrderTransactionStates::STATE_PAID  || $stateName === OrderTransactionStates::STATE_PARTIALLY_PAID) {
+                return $token;
+            }
+
+            if ($stateName === OrderTransactionStates::STATE_FAILED || $stateName === OrderTransactionStates::STATE_CANCELLED) {
+                $token->setException(new TokenInvalidatedException($paymentToken));
+                return $token;
+            }
+
+            throw new TokenInvalidatedException($paymentToken);
+        }
+
         $paymentHandler = $this->getPaymentHandlerById($token->getPaymentMethodId(), $context->getContext());
 
         try {
@@ -169,6 +187,7 @@ class PaymentService
         $criteria = new Criteria([$orderTransactionId]);
         $criteria->setTitle('payment-service::load-transaction');
         $criteria->addAssociation('order');
+        $criteria->addAssociation('stateMachineState');
         $criteria->addAssociation('paymentMethod.appPaymentMethod.app');
         /** @var OrderTransactionEntity|null $orderTransaction */
         $orderTransaction = $this->orderTransactionRepository->search($criteria, $context)->first();
